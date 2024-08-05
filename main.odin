@@ -6,6 +6,7 @@ import "core:mem"
 import "core:os"
 import "core:strings"
 import "core:io"
+import "core:encoding/hex"
 
 MODE_32 :: false
 
@@ -182,6 +183,49 @@ write_string :: proc(location: ^u8, s: cstring){
 }
 
 
+RegisterCode :: enum u8 {
+  RAX,
+  RCX,
+  RDX,
+  RBX,
+  RSP,
+  RBP,
+  RSI,
+  RDI
+}
+
+
+push :: proc(register: RegisterCode) -> u8 {
+  return 0x50 | cast(u8)register
+}
+
+pop :: proc(register: RegisterCode) -> u8 {
+  return 0x58 | cast(u8)register
+}
+
+ret :: proc() -> u8 {
+  return 0xC3
+}
+
+movq :: proc(register_a: RegisterCode, register_b: RegisterCode) -> [3]u8 {
+  REX :u8 : 0x40 | 0x8
+  OP_CODE: u8 : 0x89
+  OPERANDS_REGISTER :: 0xC0
+  return {REX, OP_CODE, (OPERANDS_REGISTER | (cast(u8)register_a) << 3) | cast(u8)register_b}
+}
+
+movq_immidiate :: proc(register_a: RegisterCode, immediate_value: u64) -> [3]u8 {
+  
+}
+
+add_q :: proc(register_a: RegisterCode, register_b: RegisterCode) -> [3]u8 {
+  REX: u8 : 0x40 | 0x8
+  OP_CODE : u8 : 0x01
+  OPERANDS_REGISTER :: 0xC0
+  return {REX, OP_CODE, (OPERANDS_REGISTER | (cast(u8)register_a) << 3) | cast(u8)register_b}
+} 
+
+
 main :: proc(){
   output_buffer := new(OutputBuffer)
   dos_header :^IMAGE_DOS_HEADER = allocate(output_buffer, IMAGE_DOS_HEADER)
@@ -248,6 +292,13 @@ main :: proc(){
   text_section.PointerToRawData = 512
   text_section.Characteristics = 0x60000020
 
+
+  import_section := allocate(output_buffer, IMAGE_SECTION_HEADER)
+  import_section.VirtualAddress = 4096 * 2
+  import_section.PointerToRawData = 512 * 2
+  import_section.SizeOfRawData = 512
+  import_section.Characteristics = 0xC0000040
+
   write_string(&text_section.Name[0], ".text")
 
   output_buffer.index = 512
@@ -260,23 +311,56 @@ main :: proc(){
     code[3] = 0xC3
   }
   else {
-    code[0] = 0x48
-    code[1] = 0xC7
-    code[2] = 0xC0
-    code[3] = 0x28
-    code[4] = 0x00
-    code[5] = 0x00
-    code[6] = 0x00
-    code[7] = 0xC3
 
-    text_section.VirtualSize = 8
-    text_section.SizeOfRawData = 8
+    testing_import := false
+
+    if !testing_import {
+
+      code_bytes: []u8 = {0x48, 0xC7, 0xC0, 0x28, 0x00, 0x00, 0x00, 0xC3}
+      mem.copy(&code[0], &code_bytes[0], len(code_bytes))
+      size := cast(u32)len(code_bytes)
+      text_section.VirtualSize, text_section.SizeOfRawData = size, size
+
+      fmt.printfln("push instruction : %2x", push(RegisterCode.RBP))
+      fmt.printfln("movq instruction : %2x", movq(RegisterCode.RSP, RegisterCode.RBP))
+    }
+    else {
+      code_bytes: []u8 = {0x48, 0x83, 0xEC, 0xB9, 0x06, 0x04, 0x00, 0x00, 0xFF, 0x15, 0x2D, 0x20, 0x00, 0x00}
+      mem.copy(&code[0], &code_bytes[0], len(code_bytes))
+      text_section.VirtualSize = cast(u32)len(code_bytes)
+      text_section.SizeOfRawData = cast(u32)len(code_bytes)
+    }
+
   }
+  
+  IMPORT_RVA := import_section.VirtualAddress - cast(u32)output_buffer.index 
+  // import section
+  kernel32_name: cstring = "KERNEL32.DLL"
+  kernel_name_RVA :u32 = cast(u32)output_buffer.index + IMPORT_RVA
+  write_string(&output_buffer.buffer[output_buffer.index], kernel32_name)
+  output_buffer.index += len(kernel32_name)
 
-  output_buffer.index = 512 * 2
-  idata := allocate(output_buffer, [512]u8)
+  exit_process_RVA :u64 = u64(cast(u32)output_buffer.index + IMPORT_RVA)
+  output_buffer.index += 2 // hint
+  message_box_a_name: cstring = "ExitProcess"
+  write_string(&output_buffer.buffer[output_buffer.index], message_box_a_name)
+  output_buffer.index += len(message_box_a_name)
 
 
+  // kernel table
+  kernel_table_RVA := cast(u32)output_buffer.index + IMPORT_RVA
+  mem.copy(&output_buffer.buffer[output_buffer.index], &exit_process_RVA, size_of(exit_process_RVA))
+  output_buffer.index += size_of(exit_process_RVA)
+  output_buffer.index += 8 // zero termination
+
+  kernel32_descriptor := allocate(output_buffer, IMAGE_IMPORT_DESCRIPTOR)
+  kernel32_descriptor.Name = kernel_name_RVA
+  kernel32_descriptor.FirstThunk = kernel_table_RVA
+
+  import_section.VirtualSize = cast(u32)(output_buffer.index - 512 * 2)
+
+  output_buffer.index = 512 * 3
+  
   file, err := os.open("thingy.exe", os.O_CREATE)
   os.write(file, output_buffer.buffer[0: output_buffer.index + 1])
   os.close(file)

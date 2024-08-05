@@ -5,9 +5,11 @@ format PE64 GUI
 entry start
 
 section '.text' code readable executable
-start:
-  mov rax, 40
-  ret
+
+  start:
+	sub	rsp,8*5 	; reserve stack for API use and make stack dqword aligned
+	mov	ecx, 1030
+	call	[ExitProcess]
 
 section '.data' data readable writeable
 
