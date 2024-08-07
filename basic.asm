@@ -7,8 +7,21 @@ entry start
 section '.text' code readable executable
 
   start:
-	sub	rsp,8*5 	; reserve stack for API use and make stack dqword aligned
-	mov	ecx, 1030
+	; sub	rsp,8*5 	; reserve stack for API use and make stack dqword aligned
+
+	mov	r9d,0
+	; lea	r8,[_caption]
+	; lea	rdx,[_message]
+	; mov	rcx,0
+	; call	[MessageBoxA]
+
+	mov	rcx, 3
+  mov	rcx, 3
+  mov	rcx, 3
+  mov	rcx, 3
+  mov	rcx, 3
+  mov	rcx, 3
+  
 	call	[ExitProcess]
 
 section '.data' data readable writeable
@@ -22,13 +35,6 @@ section '.idata' import data readable writeable
   dd 0,0,0,RVA user_name,RVA user_table
   dd 0,0,0,0,0
 
-  kernel_table:
-    ExitProcess dq RVA _ExitProcess
-    dq 0
-  user_table:
-    MessageBoxA dq RVA _MessageBoxA
-    dq 0
-
   kernel_name db 'KERNEL32.DLL',0
   user_name db 'USER32.DLL',0
 
@@ -36,3 +42,11 @@ section '.idata' import data readable writeable
     db 'ExitProcess',0
   _MessageBoxA dw 0
     db 'MessageBoxA',0
+
+  kernel_table:
+    ExitProcess dq RVA _ExitProcess
+    dq 0
+  user_table:
+    MessageBoxA dq RVA _MessageBoxA
+    dq 0
+

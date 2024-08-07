@@ -179,7 +179,7 @@ allocate :: proc(using b: ^OutputBuffer, $T: typeid) -> ^T{
 }
 
 write_string :: proc(location: ^u8, s: cstring){
-  mem.copy(location, cast(^u8)s, len(s))
+  mem.copy(location, cast(^u8)s, len(s) + 1)
 }
 
 
@@ -192,6 +192,12 @@ RegisterCode :: enum u8 {
   RBP,
   RSI,
   RDI
+}
+
+append_array :: proc(array_a: ^[dynamic]$T, array_b: [$S]T){
+  for elem in array_b {
+    append(array_a, elem)
+  }
 }
 
 
@@ -207,23 +213,67 @@ ret :: proc() -> u8 {
   return 0xC3
 }
 
+call_relative_32 :: proc(relative_offset: u32) -> [6]u8 {
+  offset_local := relative_offset
+  OP_CODE: u8 = 0xFF
+  output: [6]u8 = {OP_CODE, 0x15, 0, 0, 0, 0}
+  mem.copy(&output[2], &offset_local, size_of(offset_local))
+  return output
+}
+
 movq :: proc(register_a: RegisterCode, register_b: RegisterCode) -> [3]u8 {
   REX :u8 : 0x40 | 0x8
   OP_CODE: u8 : 0x89
   OPERANDS_REGISTER :: 0xC0
-  return {REX, OP_CODE, (OPERANDS_REGISTER | (cast(u8)register_a) << 3) | cast(u8)register_b}
+  return {REX, OP_CODE, (OPERANDS_REGISTER | (cast(u8)register_b) << 3) | cast(u8)register_a}
 }
 
-movq_immidiate :: proc(register_a: RegisterCode, immediate_value: u64) -> [3]u8 {
+movq_immidiate :: proc(register_a: RegisterCode, immediate_value: i32) -> [7]u8 {
+  REX : u8 : 0x40 | 0x8
+  OP_CODE : u8 : 0xC7
   
+  output: [7]u8 = {REX, OP_CODE, 0xC0 | cast(u8)register_a, 0, 0, 0, 0}
+  value_copy : i32 = immediate_value
+  mem.copy(&output[3], &value_copy, size_of(value_copy))
+  return output
 }
 
 add_q :: proc(register_a: RegisterCode, register_b: RegisterCode) -> [3]u8 {
   REX: u8 : 0x40 | 0x8
   OP_CODE : u8 : 0x01
   OPERANDS_REGISTER :: 0xC0
+  return {REX, OP_CODE, (OPERANDS_REGISTER | (cast(u8)register_b) << 3) | cast(u8)register_a}
+}
+
+imul :: proc(register_a: RegisterCode, register_b :RegisterCode) -> [4]u8 {
+  REX: u8 = 0x40 | 0x8
+  OP_CODE: u8 = 0x0F
+  OPERANDS_REGISTER :: 0xC0
+  return {REX, OP_CODE, 0xAF, (OPERANDS_REGISTER | (cast(u8)register_a) << 3) | cast(u8)register_b}
+}
+
+xor :: proc(register_a: RegisterCode, register_b: RegisterCode) -> [3]u8 {
+  REX: u8 = 0x40 | 0x8
+  OP_CODE: u8 = 0x31
+  OPERANDS_REGISTER :: 0xC0
   return {REX, OP_CODE, (OPERANDS_REGISTER | (cast(u8)register_a) << 3) | cast(u8)register_b}
-} 
+}
+
+idiv :: proc(register_a: RegisterCode) -> [3]u8{
+  REX: u8 = 0x40 | 0x8
+  OP_CODE: u8 = 0xF7
+  OPERANDS_REGISTER :: 0xF8
+  return { REX, OP_CODE, (OPERANDS_REGISTER | (cast(u8)register_a))}
+}
+
+print_hex_array :: proc(array: [$Size]u8){ 
+  fmt.print("[")
+  for i in 0..<(len(array) -1){
+    fmt.printf("%2x, ", array[i])
+  }
+  fmt.printf("%2x", array[len(array) - 1])
+  fmt.print("]\n")
+}
 
 
 main :: proc(){
@@ -257,7 +307,7 @@ main :: proc(){
     NT_CHARACTERISTICS |= IMAGE_FILE_LARGE_ADDRESS_AWARE
   }
 
-  SECTION_COUNT :: 1
+  SECTION_COUNT :: 2
   
   nt_header: ^HEADER = allocate(output_buffer, HEADER)
   nt_header.Signature = "PE"
@@ -291,15 +341,17 @@ main :: proc(){
   text_section.SizeOfRawData = 512
   text_section.PointerToRawData = 512
   text_section.Characteristics = 0x60000020
+  write_string(&text_section.Name[0], ".text")
 
 
   import_section := allocate(output_buffer, IMAGE_SECTION_HEADER)
+  import_section.VirtualSize = 4
   import_section.VirtualAddress = 4096 * 2
   import_section.PointerToRawData = 512 * 2
   import_section.SizeOfRawData = 512
   import_section.Characteristics = 0xC0000040
+  write_string(&import_section.Name[0], ".idata")
 
-  write_string(&text_section.Name[0], ".text")
 
   output_buffer.index = 512
 
@@ -312,39 +364,42 @@ main :: proc(){
   }
   else {
 
-    testing_import := false
-
-    if !testing_import {
-
-      code_bytes: []u8 = {0x48, 0xC7, 0xC0, 0x28, 0x00, 0x00, 0x00, 0xC3}
-      mem.copy(&code[0], &code_bytes[0], len(code_bytes))
-      size := cast(u32)len(code_bytes)
-      text_section.VirtualSize, text_section.SizeOfRawData = size, size
-
-      fmt.printfln("push instruction : %2x", push(RegisterCode.RBP))
-      fmt.printfln("movq instruction : %2x", movq(RegisterCode.RSP, RegisterCode.RBP))
-    }
-    else {
-      code_bytes: []u8 = {0x48, 0x83, 0xEC, 0xB9, 0x06, 0x04, 0x00, 0x00, 0xFF, 0x15, 0x2D, 0x20, 0x00, 0x00}
-      mem.copy(&code[0], &code_bytes[0], len(code_bytes))
-      text_section.VirtualSize = cast(u32)len(code_bytes)
-      text_section.SizeOfRawData = cast(u32)len(code_bytes)
-    }
-
+    code_bytes: [dynamic]u8
+    // push(RegisterCode.RBP)
+    append_array(&code_bytes, movq_immidiate(RegisterCode.RBX, 4))
+    append_array(&code_bytes, movq_immidiate(RegisterCode.RAX, 3))
+    append_array(&code_bytes, imul(RegisterCode.RAX, RegisterCode.RBX))
+    append_array(&code_bytes, movq_immidiate(RegisterCode.RBX, 7))
+    append_array(&code_bytes, xor(RegisterCode.RDX, RegisterCode.RDX))
+    append_array(&code_bytes, idiv(RegisterCode.RBX))
+    append_array(&code_bytes, movq(RegisterCode.RAX, RegisterCode.RDX))
+    append_array(&code_bytes, movq(RegisterCode.RCX, RegisterCode.RAX))
+    append_array(&code_bytes, call_relative_32(0x1018))
+    append(&code_bytes, ret())
+    mem.copy(&code[0], &code_bytes[0], len(code_bytes))
+    
+    size := cast(u32)len(code_bytes)
+    text_section.VirtualSize = size
   }
-  
+
+  output_buffer.index = 512 * 2
+
   IMPORT_RVA := import_section.VirtualAddress - cast(u32)output_buffer.index 
+  descriptor_RVA: u32 = cast(u32)output_buffer.index + IMPORT_RVA
+  kernel32_descriptor := allocate(output_buffer, IMAGE_IMPORT_DESCRIPTOR)
+  termination_entry := allocate(output_buffer, IMAGE_IMPORT_DESCRIPTOR)
+  
   // import section
   kernel32_name: cstring = "KERNEL32.DLL"
   kernel_name_RVA :u32 = cast(u32)output_buffer.index + IMPORT_RVA
   write_string(&output_buffer.buffer[output_buffer.index], kernel32_name)
-  output_buffer.index += len(kernel32_name)
+  output_buffer.index += len(kernel32_name) + 1
 
   exit_process_RVA :u64 = u64(cast(u32)output_buffer.index + IMPORT_RVA)
   output_buffer.index += 2 // hint
   message_box_a_name: cstring = "ExitProcess"
   write_string(&output_buffer.buffer[output_buffer.index], message_box_a_name)
-  output_buffer.index += len(message_box_a_name)
+  output_buffer.index += len(message_box_a_name) + 1
 
 
   // kernel table
@@ -353,11 +408,14 @@ main :: proc(){
   output_buffer.index += size_of(exit_process_RVA)
   output_buffer.index += 8 // zero termination
 
-  kernel32_descriptor := allocate(output_buffer, IMAGE_IMPORT_DESCRIPTOR)
   kernel32_descriptor.Name = kernel_name_RVA
   kernel32_descriptor.FirstThunk = kernel_table_RVA
 
   import_section.VirtualSize = cast(u32)(output_buffer.index - 512 * 2)
+  nt_header.OptionalHeader.DataDirectory[1] = {
+    VirtualAddress = descriptor_RVA,
+    Size = import_section.VirtualSize
+  }
 
   output_buffer.index = 512 * 3
   
