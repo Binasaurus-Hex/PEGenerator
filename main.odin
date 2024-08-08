@@ -355,6 +355,9 @@ main :: proc(){
 
   output_buffer.index = 512
 
+  a :u32 = 0
+  b: ^u8
+
   code: ^[512]u8 = allocate(output_buffer, [512]u8)
   when MODE_32 {
     code[0] = 0x6A
@@ -374,9 +377,18 @@ main :: proc(){
     append_array(&code_bytes, idiv(RegisterCode.RBX))
     append_array(&code_bytes, movq(RegisterCode.RAX, RegisterCode.RDX))
     append_array(&code_bytes, movq(RegisterCode.RCX, RegisterCode.RAX))
-    append_array(&code_bytes, call_relative_32(0x1018))
+    append_array(&code_bytes, movq(RegisterCode.RCX, RegisterCode.RAX))
+    append_array(&code_bytes, movq(RegisterCode.RCX, RegisterCode.RAX))
+    append_array(&code_bytes, movq(RegisterCode.RCX, RegisterCode.RAX))
+    append_array(&code_bytes, movq(RegisterCode.RCX, RegisterCode.RAX))
+    append_array(&code_bytes, movq(RegisterCode.RCX, RegisterCode.RAX))
+    append_array(&code_bytes, call_relative_32(0x00))
+    call_index := len(code_bytes) - 4
+    a = text_section.VirtualAddress + cast(u32)len(code_bytes)
     append(&code_bytes, ret())
     mem.copy(&code[0], &code_bytes[0], len(code_bytes))
+
+    b = &code[call_index]
     
     size := cast(u32)len(code_bytes)
     text_section.VirtualSize = size
@@ -404,6 +416,9 @@ main :: proc(){
 
   // kernel table
   kernel_table_RVA := cast(u32)output_buffer.index + IMPORT_RVA
+  call_offset := kernel_table_RVA - a
+  mem.copy(b, &call_offset, 4)
+
   mem.copy(&output_buffer.buffer[output_buffer.index], &exit_process_RVA, size_of(exit_process_RVA))
   output_buffer.index += size_of(exit_process_RVA)
   output_buffer.index += 8 // zero termination
