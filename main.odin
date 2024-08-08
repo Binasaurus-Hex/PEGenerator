@@ -13,18 +13,18 @@ MODE_32 :: false
 IMAGE_DOS_HEADER :: struct {
   e_magic : [2]u8,
 
-  e_cblp, 
-  e_cp, 
-  e_crlc, 
-  e_cparhdr, 
-  e_minalloc, 
-  e_maxalloc, 
-  e_ss, 
-  e_sp, 
-  e_csum, 
-  e_ip, 
-  e_cs, 
-  e_lfarlc, 
+  e_cblp: u16, 
+  e_cp: u16, 
+  e_crlc: u16, 
+  e_cparhdr: u16, 
+  e_minalloc: u16, 
+  e_maxalloc: u16, 
+  e_ss: u16, 
+  e_sp: u16, 
+  e_csum: u16, 
+  e_ip: u16, 
+  e_cs: u16, 
+  e_lfarlc: u16, 
   e_ovno: u16,
 
   e_res: [4]u16,
@@ -182,6 +182,27 @@ write_string :: proc(location: ^u8, s: cstring){
   mem.copy(location, cast(^u8)s, len(s) + 1)
 }
 
+alloc_u8_array :: proc(b: ^OutputBuffer, array: [$Size]u8) -> ^[Size]u8 {
+  ptr := allocate(b, type_of(array))
+  for i in 0..<len(array) {
+    ptr[i] = array[i]
+  }
+  return ptr
+}
+
+alloc_u8 :: proc(b: ^OutputBuffer, value: u8) -> ^u8 {
+  ptr := allocate(b, u8)
+  ptr^ = value
+  return ptr
+}
+
+alloc_string :: proc(using b: ^OutputBuffer, value: cstring) -> ^cstring {
+  write_string(&buffer[index], value)
+  ptr := cast(^cstring)&buffer[index]
+  index += len(value) + 1
+  return ptr
+}
+
 
 RegisterCode :: enum u8 {
   RAX,
@@ -275,6 +296,26 @@ print_hex_array :: proc(array: [$Size]u8){
   fmt.print("]\n")
 }
 
+ImportFunctionEntry :: struct {
+  name: cstring,
+  name_RVA: u64,
+  rva: u32
+}
+
+ImportEntry :: struct {
+  dll_name: cstring,
+  functions: []ImportFunctionEntry,
+  
+  // filled in later
+  descriptor_RVA: u32,
+  descriptor: ^IMAGE_IMPORT_DESCRIPTOR
+}
+
+ImportCall :: struct {
+  function_name: cstring,
+  buffer_index: int
+}
+
 
 main :: proc(){
   output_buffer := new(OutputBuffer)
@@ -288,42 +329,24 @@ main :: proc(){
   IMAGE_FILE_LINE_NUMS_STRIPPED :: 0x0004
   IMAGE_FILE_LOCAL_SYMS_STRIPPED :: 0x0008
   IMAGE_FILE_LARGE_ADDRESS_AWARE :: 0x0020
-  IMAGE_FILE_32BIT_MACHINE :: 0x0100
   IMAGE_FILE_DEBUG_STRIPPED :: 0x0200
 
   
-  NT_CHARACTERISTICS :u16 = IMAGE_FILE_RELOCS_STRIPPED | IMAGE_FILE_EXECUTABLE_IMAGE | IMAGE_FILE_LOCAL_SYMS_STRIPPED | IMAGE_FILE_LINE_NUMS_STRIPPED
-  
-  when MODE_32 {
-    HEADER :: IMAGE_NT_HEADERS
-    OPTIONAL :: IMAGE_OPTIONAL_HEADER
-    CODE :: 0x10B
-    NT_CHARACTERISTICS |= IMAGE_FILE_32BIT_MACHINE
-  }
-  else {
-    HEADER :: IMAGE_NT_HEADERS64
-    OPTIONAL :: IMAGE_OPTIONAL_HEADER64
-    CODE :: 0x20B
-    NT_CHARACTERISTICS |= IMAGE_FILE_LARGE_ADDRESS_AWARE
-  }
+  NT_CHARACTERISTICS :u16 = IMAGE_FILE_RELOCS_STRIPPED | IMAGE_FILE_EXECUTABLE_IMAGE | IMAGE_FILE_LOCAL_SYMS_STRIPPED | IMAGE_FILE_LINE_NUMS_STRIPPED | IMAGE_FILE_LARGE_ADDRESS_AWARE
 
   SECTION_COUNT :: 2
   
-  nt_header: ^HEADER = allocate(output_buffer, HEADER)
+  nt_header: ^IMAGE_NT_HEADERS64 = allocate(output_buffer, IMAGE_NT_HEADERS64)
   nt_header.Signature = "PE"
   nt_header.FileHeader = {
-    Machine = 0x14C,
+    Machine = 0x8664,
     NumberOfSections = SECTION_COUNT,
-    SizeOfOptionalHeader = size_of(OPTIONAL),
+    SizeOfOptionalHeader = size_of(IMAGE_OPTIONAL_HEADER64),
     Characteristics = NT_CHARACTERISTICS,
   }
 
-  if !MODE_32 {
-    nt_header.FileHeader.Machine = 0x8664
-  }
-
   nt_header.OptionalHeader = {
-    Magic = CODE,
+    Magic = 0x20B,
     AddressOfEntryPoint = 4096,
     ImageBase = 0x400000,
     SectionAlignment = 4096,
@@ -353,82 +376,87 @@ main :: proc(){
   write_string(&import_section.Name[0], ".idata")
 
 
-  output_buffer.index = 512
-
-  a :u32 = 0
-  b: ^u8
-
-  code: ^[512]u8 = allocate(output_buffer, [512]u8)
-  when MODE_32 {
-    code[0] = 0x6A
-    code[1] = 100
-    code[2] = 0x58
-    code[3] = 0xC3
-  }
-  else {
-
-    code_bytes: [dynamic]u8
-    // push(RegisterCode.RBP)
-    append_array(&code_bytes, movq_immidiate(RegisterCode.RBX, 4))
-    append_array(&code_bytes, movq_immidiate(RegisterCode.RAX, 3))
-    append_array(&code_bytes, imul(RegisterCode.RAX, RegisterCode.RBX))
-    append_array(&code_bytes, movq_immidiate(RegisterCode.RBX, 7))
-    append_array(&code_bytes, xor(RegisterCode.RDX, RegisterCode.RDX))
-    append_array(&code_bytes, idiv(RegisterCode.RBX))
-    append_array(&code_bytes, movq(RegisterCode.RAX, RegisterCode.RDX))
-    append_array(&code_bytes, movq(RegisterCode.RCX, RegisterCode.RAX))
-    append_array(&code_bytes, movq(RegisterCode.RCX, RegisterCode.RAX))
-    append_array(&code_bytes, movq(RegisterCode.RCX, RegisterCode.RAX))
-    append_array(&code_bytes, movq(RegisterCode.RCX, RegisterCode.RAX))
-    append_array(&code_bytes, movq(RegisterCode.RCX, RegisterCode.RAX))
-    append_array(&code_bytes, movq(RegisterCode.RCX, RegisterCode.RAX))
-    append_array(&code_bytes, call_relative_32(0x00))
-    call_index := len(code_bytes) - 4
-    a = text_section.VirtualAddress + cast(u32)len(code_bytes)
-    append(&code_bytes, ret())
-    mem.copy(&code[0], &code_bytes[0], len(code_bytes))
-
-    b = &code[call_index]
-    
-    size := cast(u32)len(code_bytes)
-    text_section.VirtualSize = size
-  }
-
-  output_buffer.index = 512 * 2
-
-  IMPORT_RVA := import_section.VirtualAddress - cast(u32)output_buffer.index 
-  descriptor_RVA: u32 = cast(u32)output_buffer.index + IMPORT_RVA
-  kernel32_descriptor := allocate(output_buffer, IMAGE_IMPORT_DESCRIPTOR)
-  termination_entry := allocate(output_buffer, IMAGE_IMPORT_DESCRIPTOR)
   
+  import_calls: [dynamic]ImportCall 
+  
+  output_buffer.index = 512
+  alloc_u8_array(output_buffer, movq_immidiate(RegisterCode.RBX, 4))
+  alloc_u8_array(output_buffer, movq_immidiate(RegisterCode.RAX, 3))
+  alloc_u8_array(output_buffer, imul(RegisterCode.RAX, RegisterCode.RBX))
+  alloc_u8_array(output_buffer, movq_immidiate(RegisterCode.RBX, 7))
+  alloc_u8_array(output_buffer, xor(RegisterCode.RDX, RegisterCode.RDX))
+  alloc_u8_array(output_buffer, idiv(RegisterCode.RBX))
+  alloc_u8_array(output_buffer, movq(RegisterCode.RAX, RegisterCode.RDX))
+  alloc_u8_array(output_buffer, movq(RegisterCode.RCX, RegisterCode.RAX))
+  alloc_u8_array(output_buffer, call_relative_32(0x00))
+
+  append(&import_calls, ImportCall{"ExitProcess", output_buffer.index})
+  
+  alloc_u8(output_buffer, ret())
+  
+  text_section.VirtualSize = cast(u32)output_buffer.index - 512
+  
+
   // import section
-  kernel32_name: cstring = "KERNEL32.DLL"
-  kernel_name_RVA :u32 = cast(u32)output_buffer.index + IMPORT_RVA
-  write_string(&output_buffer.buffer[output_buffer.index], kernel32_name)
-  output_buffer.index += len(kernel32_name) + 1
+  import_entries: []ImportEntry = {
+    {
+      dll_name = "KERNEL32.DLL",
+      functions = {
+        ImportFunctionEntry{name = "ExitProcess"}
+      }
+    }
+  }
 
-  exit_process_RVA :u64 = u64(cast(u32)output_buffer.index + IMPORT_RVA)
-  output_buffer.index += 2 // hint
-  message_box_a_name: cstring = "ExitProcess"
-  write_string(&output_buffer.buffer[output_buffer.index], message_box_a_name)
-  output_buffer.index += len(message_box_a_name) + 1
+  output_buffer.index = cast(int)import_section.PointerToRawData
 
+  IMPORT_RVA := import_section.VirtualAddress - cast(u32)output_buffer.index
 
-  // kernel table
-  kernel_table_RVA := cast(u32)output_buffer.index + IMPORT_RVA
-  call_offset := kernel_table_RVA - a
-  mem.copy(b, &call_offset, 4)
+  // Descriptors
+  for &import_entry in import_entries {
+    import_entry.descriptor_RVA = cast(u32)output_buffer.index + IMPORT_RVA
+    import_entry.descriptor = allocate(output_buffer, IMAGE_IMPORT_DESCRIPTOR)
+  }
+  termination_entry := allocate(output_buffer, IMAGE_IMPORT_DESCRIPTOR)
 
-  mem.copy(&output_buffer.buffer[output_buffer.index], &exit_process_RVA, size_of(exit_process_RVA))
-  output_buffer.index += size_of(exit_process_RVA)
-  output_buffer.index += 8 // zero termination
+  // Library name strings
+  for &import_entry in import_entries {
+    import_entry.descriptor.Name = cast(u32)output_buffer.index + IMPORT_RVA
+    alloc_string(output_buffer, import_entry.dll_name)
+  }
 
-  kernel32_descriptor.Name = kernel_name_RVA
-  kernel32_descriptor.FirstThunk = kernel_table_RVA
+  // function name strings / 'Hints'
+  for &import_entry in import_entries {
+    for &function_call in import_entry.functions {
+      function_call.name_RVA = u64(cast(u32)output_buffer.index + IMPORT_RVA)
+      output_buffer.index += 2 // hint
+      alloc_string(output_buffer, function_call.name)
+    }
+  }
+
+  // import table
+  for &import_entry in import_entries {
+    import_entry.descriptor.FirstThunk = cast(u32)output_buffer.index + IMPORT_RVA
+    for &function_call in import_entry.functions {
+      function_call.rva = cast(u32)output_buffer.index + IMPORT_RVA
+      for import_call in import_calls {
+        if import_call.function_name != function_call.name {
+          continue
+        }
+
+        virtual_address := (cast(u32)import_call.buffer_index - text_section.PointerToRawData) + text_section.VirtualAddress
+        offset :u32 = function_call.rva - virtual_address
+        mem.copy(&(output_buffer.buffer[import_call.buffer_index - size_of(u32)]), &offset, size_of(u32))
+      }
+      rva_entry := allocate(output_buffer, u64)
+      rva_entry^ = function_call.name_RVA
+    }
+    output_buffer.index += size_of(u64) // termination entry
+  }
 
   import_section.VirtualSize = cast(u32)(output_buffer.index - 512 * 2)
+  
   nt_header.OptionalHeader.DataDirectory[1] = {
-    VirtualAddress = descriptor_RVA,
+    VirtualAddress = import_section.VirtualAddress,
     Size = import_section.VirtualSize
   }
 
