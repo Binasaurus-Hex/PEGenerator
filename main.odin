@@ -212,7 +212,17 @@ RegisterCode :: enum u8 {
   RSP,
   RBP,
   RSI,
-  RDI
+  RDI,
+  // extended registers
+  R8,
+  R9,
+  R10,
+  R11,
+  R12,
+  R13,
+  R14,
+  R15,
+  NONE,
 }
 
 append_array :: proc(array_a: ^[dynamic]$T, array_b: [$S]T){
@@ -223,11 +233,23 @@ append_array :: proc(array_a: ^[dynamic]$T, array_b: [$S]T){
 
 
 push :: proc(register: RegisterCode) -> u8 {
+  assert(register < RegisterCode.R8)
   return 0x50 | cast(u8)register
 }
 
+push_extended :: proc(register: RegisterCode) -> [2]u8 {
+  assert(register >= RegisterCode.R8)
+  return {0x41, 0x50 | cast(u8)register}
+}
+
 pop :: proc(register: RegisterCode) -> u8 {
+  assert(register < RegisterCode.R8)
   return 0x58 | cast(u8)register
+}
+
+pop_extended :: proc(register: RegisterCode) -> [2]u8 {
+  assert(register >= RegisterCode.R8)
+  return {0x41, 0x58 | cast(u8)register }
 }
 
 ret :: proc() -> u8 {
@@ -243,14 +265,14 @@ call_relative_32 :: proc(relative_offset: u32) -> [6]u8 {
 }
 
 movq :: proc(register_a: RegisterCode, register_b: RegisterCode) -> [3]u8 {
-  REX :u8 : 0x40 | 0x8
+  REX, register_a, register_b := REX_compute(register_a, register_b)
   OP_CODE: u8 : 0x89
   OPERANDS_REGISTER :: 0xC0
   return {REX, OP_CODE, (OPERANDS_REGISTER | (cast(u8)register_b) << 3) | cast(u8)register_a}
 }
 
 movq_immidiate :: proc(register_a: RegisterCode, immediate_value: i32) -> [7]u8 {
-  REX : u8 : 0x40 | 0x8
+  REX, register_a, _:= REX_compute(register_a, RegisterCode.NONE)
   OP_CODE : u8 : 0xC7
   
   output: [7]u8 = {REX, OP_CODE, 0xC0 | cast(u8)register_a, 0, 0, 0, 0}
@@ -259,24 +281,44 @@ movq_immidiate :: proc(register_a: RegisterCode, immediate_value: i32) -> [7]u8 
   return output
 }
 
+REX_compute :: proc(register_a: RegisterCode, register_b: RegisterCode) -> (u8, RegisterCode, RegisterCode) {
+  REX :u8 = 0x48
+  register_a := register_a
+  register_b := register_b
+  if register_a >= RegisterCode.R8 {
+    REX |= 0x1
+    register_a -= RegisterCode.R8
+  }
+  if register_b >= RegisterCode.R8 && register_b != RegisterCode.NONE {
+    REX |= 0x4
+    register_b -= RegisterCode.R8
+  }
+  return REX, register_a, register_b
+}
+
 add_q :: proc(register_a: RegisterCode, register_b: RegisterCode) -> [3]u8 {
-  REX: u8 : 0x40 | 0x8
   OP_CODE : u8 : 0x01
   OPERANDS_REGISTER :: 0xC0
+  REX, register_a, register_b := REX_compute(register_a, register_b)
   return {REX, OP_CODE, (OPERANDS_REGISTER | (cast(u8)register_b) << 3) | cast(u8)register_a}
 }
 
+sub_u8 :: proc(register: RegisterCode, value: u8) -> [4]u8 {
+  REX, register, _ := REX_compute(register, RegisterCode.NONE)
+  return {REX, 0x83, 0xEC, value}
+}
+
 imul :: proc(register_a: RegisterCode, register_b :RegisterCode) -> [4]u8 {
-  REX: u8 = 0x40 | 0x8
   OP_CODE: u8 = 0x0F
   OPERANDS_REGISTER :: 0xC0
+  REX, register_a, register_b := REX_compute(register_a, register_b)
   return {REX, OP_CODE, 0xAF, (OPERANDS_REGISTER | (cast(u8)register_a) << 3) | cast(u8)register_b}
 }
 
 xor :: proc(register_a: RegisterCode, register_b: RegisterCode) -> [3]u8 {
-  REX: u8 = 0x40 | 0x8
   OP_CODE: u8 = 0x31
   OPERANDS_REGISTER :: 0xC0
+  REX, register_a, register_b := REX_compute(register_a, register_b)
   return {REX, OP_CODE, (OPERANDS_REGISTER | (cast(u8)register_a) << 3) | cast(u8)register_b}
 }
 
@@ -285,6 +327,14 @@ idiv :: proc(register_a: RegisterCode) -> [3]u8{
   OP_CODE: u8 = 0xF7
   OPERANDS_REGISTER :: 0xF8
   return { REX, OP_CODE, (OPERANDS_REGISTER | (cast(u8)register_a))}
+}
+
+lea :: proc(register: RegisterCode, address: u32) -> [7]u8 {
+  REX, _, register := REX_compute(RegisterCode.NONE, register)
+  result :[7]u8 = {REX, 0x8D, (0x00 | (cast(u8)register << 3)) | 0x05, 0, 0, 0, 0}
+  address := address
+  mem.copy(&result[3], &address, size_of(u32))
+  return result
 }
 
 print_hex_array :: proc(array: [$Size]u8){ 
@@ -334,7 +384,7 @@ main :: proc(){
   
   NT_CHARACTERISTICS :u16 = IMAGE_FILE_RELOCS_STRIPPED | IMAGE_FILE_EXECUTABLE_IMAGE | IMAGE_FILE_LOCAL_SYMS_STRIPPED | IMAGE_FILE_LINE_NUMS_STRIPPED | IMAGE_FILE_LARGE_ADDRESS_AWARE
 
-  SECTION_COUNT :: 2
+  SECTION_COUNT :: 3
   
   nt_header: ^IMAGE_NT_HEADERS64 = allocate(output_buffer, IMAGE_NT_HEADERS64)
   nt_header.Signature = "PE"
@@ -354,47 +404,70 @@ main :: proc(){
     MajorSubsystemVersion = 4,
     SizeOfImage = 4096 * (SECTION_COUNT + 1),
     SizeOfHeaders = 512,
-    Subsystem = 3,
+    Subsystem = 2,
+    SizeOfStackReserve = 0x1000,
+    SizeOfStackCommit = 0x1000,
+    SizeOfHeapReserve = 0x10000,
     NumberOfRvaAndSizes = IMAGE_NUMBEROF_DIRECTORY_ENTRIES
   }
 
   text_section: ^IMAGE_SECTION_HEADER = allocate(output_buffer, IMAGE_SECTION_HEADER)
-  text_section.VirtualSize = 4
   text_section.VirtualAddress = 4096
   text_section.SizeOfRawData = 512
   text_section.PointerToRawData = 512
   text_section.Characteristics = 0x60000020
   write_string(&text_section.Name[0], ".text")
 
+  data_section: ^IMAGE_SECTION_HEADER = allocate(output_buffer, IMAGE_SECTION_HEADER)
+  data_section.VirtualAddress = 4096 * 2
+  data_section.SizeOfRawData = 512
+  data_section.PointerToRawData = 512 * 2
+  data_section.Characteristics = 0xC0000040
+  write_string(&data_section.Name[0], ".data")
 
-  import_section := allocate(output_buffer, IMAGE_SECTION_HEADER)
-  import_section.VirtualSize = 4
-  import_section.VirtualAddress = 4096 * 2
-  import_section.PointerToRawData = 512 * 2
+
+  import_section :^IMAGE_SECTION_HEADER = allocate(output_buffer, IMAGE_SECTION_HEADER)
+  import_section.VirtualAddress = 4096 * 3
+  import_section.PointerToRawData = 512 * 3
   import_section.SizeOfRawData = 512
   import_section.Characteristics = 0xC0000040
   write_string(&import_section.Name[0], ".idata")
 
 
-  
-  import_calls: [dynamic]ImportCall 
+  data_strings: [dynamic]ImportCall
+  import_calls: [dynamic]ImportCall
   
   output_buffer.index = 512
-  alloc_u8_array(output_buffer, movq_immidiate(RegisterCode.RBX, 4))
-  alloc_u8_array(output_buffer, movq_immidiate(RegisterCode.RAX, 3))
-  alloc_u8_array(output_buffer, imul(RegisterCode.RAX, RegisterCode.RBX))
-  alloc_u8_array(output_buffer, movq_immidiate(RegisterCode.RBX, 7))
-  alloc_u8_array(output_buffer, xor(RegisterCode.RDX, RegisterCode.RDX))
-  alloc_u8_array(output_buffer, idiv(RegisterCode.RBX))
-  alloc_u8_array(output_buffer, movq(RegisterCode.RAX, RegisterCode.RDX))
-  alloc_u8_array(output_buffer, movq(RegisterCode.RCX, RegisterCode.RAX))
-  alloc_u8_array(output_buffer, call_relative_32(0x00))
+  alloc_u8_array(output_buffer, sub_u8(RegisterCode.RSP, 0x28))
+  alloc_u8_array(output_buffer, movq_immidiate(RegisterCode.R9, 0))
+  alloc_u8_array(output_buffer, lea(RegisterCode.R8, 0))
+  append(&data_strings, ImportCall{"this is the caption boiii!!!", output_buffer.index})
 
+  alloc_u8_array(output_buffer, lea(RegisterCode.RDX, 0))
+  append(&data_strings, ImportCall{"this is the title hahahhaa", output_buffer.index})
+
+  alloc_u8_array(output_buffer, movq_immidiate(RegisterCode.RCX, 0))
+
+  alloc_u8_array(output_buffer, call_relative_32(0))
+  append(&import_calls, ImportCall{"MessageBoxA", output_buffer.index})
+
+  alloc_u8_array(output_buffer, movq(RegisterCode.RCX, RegisterCode.RAX))
+  
+  alloc_u8_array(output_buffer, call_relative_32(0))
   append(&import_calls, ImportCall{"ExitProcess", output_buffer.index})
-  
-  alloc_u8(output_buffer, ret())
-  
-  text_section.VirtualSize = cast(u32)output_buffer.index - 512
+
+  text_section.VirtualSize = cast(u32)output_buffer.index - text_section.PointerToRawData
+
+  output_buffer.index = cast(int)data_section.PointerToRawData
+  // data section
+  for data_string in data_strings {
+    string_RVA := cast(u32)output_buffer.index - data_section.PointerToRawData + data_section.VirtualAddress
+    call_RVA := cast(u32)data_string.buffer_index - text_section.PointerToRawData + text_section.VirtualAddress
+    offset :u32 = string_RVA - call_RVA
+    mem.copy(&output_buffer.buffer[data_string.buffer_index - size_of(u32)], &offset, size_of(u32))
+    alloc_string(output_buffer, data_string.function_name)
+  }
+  data_section.VirtualSize = cast(u32)output_buffer.index - data_section.PointerToRawData
   
 
   // import section
@@ -403,6 +476,12 @@ main :: proc(){
       dll_name = "KERNEL32.DLL",
       functions = {
         ImportFunctionEntry{name = "ExitProcess"}
+      }
+    },
+    {
+      dll_name = "USER32.DLL",
+      functions = {
+        ImportFunctionEntry{name = "MessageBoxA"}
       }
     }
   }
@@ -453,14 +532,14 @@ main :: proc(){
     output_buffer.index += size_of(u64) // termination entry
   }
 
-  import_section.VirtualSize = cast(u32)(output_buffer.index - 512 * 2)
+  import_section.VirtualSize = cast(u32)output_buffer.index - import_section.PointerToRawData
   
   nt_header.OptionalHeader.DataDirectory[1] = {
     VirtualAddress = import_section.VirtualAddress,
     Size = import_section.VirtualSize
   }
 
-  output_buffer.index = 512 * 3
+  output_buffer.index = 512 * 4
   
   file, err := os.open("thingy.exe", os.O_CREATE)
   os.write(file, output_buffer.buffer[0: output_buffer.index + 1])
