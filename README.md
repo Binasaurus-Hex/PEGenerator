@@ -1,4 +1,4 @@
-#PE Generator
+# PE Generator
 
 small sample project that demonstrates how to write out a PE or .exe file from scratch
 currently small selection of basic x64 instructions supported
